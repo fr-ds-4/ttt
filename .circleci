@@ -1,1 +1,23 @@
+version: 2.1
 
+jobs:
+  browser-test:
+    docker:
+      - image: mcr.microsoft.com/playwright:v1.64.1-noble
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Install matching Playwright package
+          command: npm install --no-save --no-package-lock --no-audit --no-fund playwright@1.64.1
+      - run:
+          name: Run registration test
+          command: node run.mjs
+      - store_artifacts:
+          path: results
+          destination: results
+
+workflows:
+  registration-tests:
+    jobs:
+      - browser-test
