@@ -39,8 +39,8 @@ async function run() {
   if (target.protocol !== 'https:') throw new Error('TEST_URL must use HTTPS.');
 
   const maxCases = setting('MAX_CASES', 1, 0, Number.MAX_SAFE_INTEGER);
-  const runSeconds = setting('RUN_SECONDS', 360, 1, 600);
-  const deadline = Date.now() + runSeconds * 1000;
+  const runSeconds = setting('RUN_SECONDS', 360, 0, 3600);
+  const deadline = runSeconds === 0 ? Infinity : Date.now() + runSeconds * 1000;
   const browser = await chromium.launch({ timeout: 15000 });
   try {
     const page = await browser.newPage();
@@ -85,7 +85,11 @@ async function run() {
       }
       if (maxCases === 0 || count < maxCases) await delay(2000);
     }
-    record({ stage: 'summary', responses: count });
+    record({
+      stage: 'summary',
+      responses: count,
+      reason: maxCases > 0 && count >= maxCases ? 'case_limit' : 'time_limit',
+    });
   } finally {
     await browser.close();
   }
