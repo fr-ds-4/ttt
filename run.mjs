@@ -34,7 +34,7 @@ function randomCode() {
 }
 
 async function run() {
-  if (!process.env.TEST_URL) throw new Error('Set TEST_URL in CircleCI Project Settings.');
+  if (!process.env.TEST_URL) throw new Error('Set TEST_URL in the deployment environment variables.');
   const target = new URL(process.env.TEST_URL);
   if (target.protocol !== 'https:') throw new Error('TEST_URL must use HTTPS.');
 
@@ -45,10 +45,28 @@ async function run() {
   try {
     const page = await browser.newPage();
     page.setDefaultTimeout(12000);
-    const load = await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    if (!load?.ok() || new URL(page.url()).origin !== target.origin) {
-      throw new Error('Test page failed to load or redirected to another origin.');
+    record({ stage: 'opening_page' });
+    let load;
+    try {
+      load = await page.goto(target.href, { waitUntil: 'commit', timeout: 60000 });
+    } catch (error) {
+      const networkError = error.message.match(/net::ERR_[A-Z_]+/)?.[0];
+      const reason = error.name === 'TimeoutError' ? 'timeout after 60 seconds' : networkError ?? error.name;
+      throw new Error(`Test page navigation failed before HTTP response: ${reason}.`);
     }
+    const httpStatus = load?.status() ?? null;
+    record({ stage: 'page_response', httpStatus });
+    if (!load?.ok()) throw new Error(`Test page did not return a successful HTTP response: ${httpStatus ?? 'none'}.`);
+    if (new URL(page.url()).origin !== target.origin) throw new Error('Test page redirected to another origin.');
+
+    const profile = page.locator('#profileCode');
+    try {
+      await profile.waitFor({ state: 'visible', timeout: 30000 });
+    } catch (error) {
+      if (error.name !== 'TimeoutError') throw error;
+      throw new Error('Test page returned HTTP successfully, but #profileCode did not become visible within 30 seconds.');
+    }
+    record({ stage: 'form_ready' });
 
     const confirm = page.locator('#confirmDialog');
     const result = page.locator('#resultDialog');
@@ -58,7 +76,7 @@ async function run() {
       const code = randomCode();
       let stage = 'fill';
       try {
-        await page.locator('#profileCode').fill(code);
+        await profile.fill(code);
         await page.locator('#agreeCheck').check();
         await page.locator('#submitBtn').click();
         await confirm.waitFor({ state: 'visible' });
