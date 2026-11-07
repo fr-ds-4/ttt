@@ -76,8 +76,10 @@ async function run() {
       const code = randomCode();
       let stage = 'fill';
       try {
-        await profile.fill(code);
+        await profile.fill(code, { timeout: 45000 });
+        stage = 'agree';
         await page.locator('#agreeCheck').check();
+        stage = 'open_confirmation';
         await page.locator('#submitBtn').click();
         await confirm.waitFor({ state: 'visible' });
         const codes = (await confirm.innerText()).match(/[A-Za-z0-9]+/g) ?? [];
@@ -98,6 +100,19 @@ async function run() {
           throw new Error('Result needs review. Batch stopped.');
         }
       } catch (error) {
+        if (stage === 'fill' && error.name === 'TimeoutError') {
+          const fields = await profile.evaluateAll((elements) => elements.map((input) => {
+            const style = getComputedStyle(input);
+            const bounds = input.getBoundingClientRect();
+            return {
+              visible: style.visibility === 'visible' && bounds.width > 0 && bounds.height > 0,
+              disabled: input.matches(':disabled') || Boolean(input.closest('[aria-disabled="true"]')),
+              readOnly: input.readOnly || input.getAttribute('aria-readonly') === 'true',
+              inert: Boolean(input.closest('[inert]')),
+            };
+          })).catch(() => null);
+          record({ stage: 'field_state', fields });
+        }
         record({ code, stage, error: String(error.message) });
         throw error;
       }
