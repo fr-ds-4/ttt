@@ -94,24 +94,18 @@ async function run() {
   const maxCases = setting('MAX_CASES', 1, 0, Number.MAX_SAFE_INTEGER);
   const runSeconds = setting('RUN_SECONDS', 360, 0, 3600);
   const batchSize = setting('BROWSER_BATCH_SIZE', 5, 1, 1000);
-  const cooldownSeconds = setting('BROWSER_COOLDOWN_SECONDS', 15, 15, 3600);
   const deadline = runSeconds === 0 ? Infinity : Date.now() + runSeconds * 1000;
   const state = { responses: 0 };
   const canContinue = () => !stopSignal && Date.now() < deadline &&
     (maxCases === 0 || state.responses < maxCases);
   let batch = 0;
-  record({ stage: 'batch_settings', batchSize, cooldownSeconds });
+  record({ stage: 'batch_settings', batchSize });
   while (canContinue()) {
     batch++;
     record({ stage: 'batch_started', batch, responses: state.responses });
     const limit = maxCases === 0 ? batchSize : Math.min(batchSize, maxCases - state.responses);
     await runSession(target, state, limit, deadline);
     record({ stage: 'batch_closed', batch, responses: state.responses, ...memorySnapshot() });
-    if (!canContinue()) break;
-    const waitMs = Math.min(cooldownSeconds * 1000, deadline - Date.now());
-    if (waitMs <= 0) break;
-    record({ stage: 'cooldown', batch, seconds: waitMs / 1000, responses: state.responses });
-    await delay(waitMs, undefined, { signal: abort.signal });
   }
   record({ stage: 'summary', responses: state.responses,
     reason: stopSignal ? 'signal' : maxCases > 0 && state.responses >= maxCases
