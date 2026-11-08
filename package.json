@@ -1,0 +1,8 @@
+{
+  "name": "playwright-automation-worker",
+  "version": "1.0.0",
+  "private": true,
+  "engines": { "node": "24.x" },
+  "scripts": { "start": "node start-wispbyte.js" },
+  "dependencies": { "playwright": "1.64.1" }
+}

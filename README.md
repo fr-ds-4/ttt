@@ -1,18 +1,14 @@
-# CircleCI Free 預約流程測試
+# Playwright 自動化工具
 
-1. 建立 GitHub 私有儲存庫，把本 ZIP 解壓後的 `.circleci/config.yml`、`run.mjs` 和本說明上傳到儲存庫根目錄。
-2. 到 CircleCI 建立 Free 專案，以 GitHub App 連接該儲存庫。
-3. 在 Project Settings → Environment Variables 新增 `TEST_URL`，值填有測試權限且可由 CircleCI 連線的 HTTPS 測試頁網址。網址不預填。
-4. 手動執行 main 分支一次。預設送出最多一筆。到工作頁的 Artifacts 開啟 `results/registration.jsonl` 檢查網站實際回覆。
-5. 確認流程後，新增 `MAX_CASES=0`，啟用按時間執行的模式。到 Project Settings → Project Setup，在對應 Pipeline 旁按 Schedule +，選 main、每日、每小時一次。初次排程以 CircleCI 顯示的時區為準。
-6. 停止未來執行可停用或刪除排程。執行中的工作可從工作流程頁面取消。
+將此 ZIP 解壓後，把內部檔案上傳至 GitHub 專案根目錄。請保留檔名以點開頭的設定檔。
 
-| CircleCI 變數 | 預設值 | 說明 |
-|---|---|---|
-| TEST_URL | 必填 | 授權測試頁的 HTTPS URL |
-| MAX_CASES | 1 | 正整數可指定每次上限，0 依時間執行 |
-| RUN_SECONDS | 360 | 每次開始新一筆的時間預算，範圍 1～600 秒。已開始的一筆可能稍晚才結束 |
+## Hostless
 
-每筆結果後等待 2 秒。若結果不明、網站限流或操作失敗，本次工作會停止。每次工作各自保存 JSONL。下次排程會啟動新的測試批次。
+1. 在 Project 的 Workers 建立 Standalone Worker，選擇此 GitHub repository 和部署分支。
+2. Working Directory 填 /。Build System 選 Docker，Dockerfile Path 填 Dockerfile。
+3. Start Command 留空即可使用 Dockerfile 的 CMD。若介面要求填寫，輸入 node start-wispbyte.js。
+4. 先使用 1 個 instance。此背景程式不需要 HOST、PORT 或 HTTP 健康檢查。
+5. 在環境變數填入 TEST_URL（你有權測試的 HTTPS 測試頁）、MAX_CASES=1、RUN_SECONDS=120。其他設定可參考 .env.example。
+6. 部署後查看 Runtime Logs。opening_page、page_response、form_ready 和 summary 分別標示開頁、回應、表單就緒及執行結束。有限測試到達次數或時間後會結束。
 
-隨機碼可用於驗證表單與驗證規則。若系統只接受已存在的代碼，隨機猜測通常只會得到驗證失敗。要測試成功寫入，請改用測試環境中已配置且可使用的代碼。網站回覆筆數與實際寫入筆數請分開看。
+Docker 建置會預裝 Node.js 24、Playwright 1.64.1、Chromium Headless Shell 和 Linux 系統依賴。程式會將日誌寫到 stdout，並嘗試寫入 results/registration.jsonl。
