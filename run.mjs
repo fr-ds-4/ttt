@@ -48,16 +48,10 @@ function memorySnapshot() {
   };
 }
 
-const activeBrowsers = new Set();
+let activeBrowser;
 let stopSignal;
 let shutdownTimer;
 const abort = new AbortController();
-function closeActiveBrowsers(reason) {
-  for (const browser of activeBrowsers) {
-    void browser.close({ reason }).catch(() => {});
-  }
-}
-
 function onSignal(signal) {
   if (stopSignal) return;
   stopSignal = signal;
@@ -66,7 +60,7 @@ function onSignal(signal) {
   abort.abort();
   shutdownTimer = setTimeout(() => process.exit(process.exitCode), 10000);
   shutdownTimer.unref();
-  closeActiveBrowsers(signal);
+  activeBrowser?.close({ reason: signal }).catch(() => {});
 }
 process.on('SIGTERM', onSignal);
 process.on('SIGINT', onSignal);
@@ -100,55 +94,36 @@ async function run() {
   const maxCases = setting('MAX_CASES', 1, 0, Number.MAX_SAFE_INTEGER);
   const runSeconds = setting('RUN_SECONDS', 360, 0, 3600);
   const deadline = runSeconds === 0 ? Infinity : Date.now() + runSeconds * 1000;
-  const browserCount = setting('BROWSER_COUNT', 2, 1, 2);
-  const limit = maxCases || Infinity;
-  const state = { responses: 0, claimed: 0 };
-  const canStartCase = () => !abort.signal.aborted && Date.now() < deadline && state.claimed < limit;
-  const claimCase = () => {
-    if (!canStartCase()) return false;
-    state.claimed++;
-    return true;
-  };
-
-  let failure;
-  const sessions = Array.from({ length: Math.min(browserCount, limit) }, (_, index) =>
-    runSession(target, state, claimCase, canStartCase, deadline, index + 1).catch(error => {
-      if (abort.signal.aborted) return;
-      failure = error;
-      abort.abort();
-      closeActiveBrowsers('Another browser session stopped');
-    }));
-  await Promise.all(sessions);
-  if (failure) throw failure;
+  const state = { responses: 0 };
+  if (!stopSignal) {
+    await runSession(target, state, maxCases || Infinity, deadline);
+  }
   record({ stage: 'summary', responses: state.responses,
     reason: stopSignal ? 'signal' : maxCases > 0 && state.responses >= maxCases
       ? 'case_limit' : 'time_limit' });
 }
 
-async function runSession(target, state, claimCase, canStartCase, deadline, browserId) {
-  const log = entry => record({ browser: browserId, ...entry });
-  if (abort.signal.aborted) return;
-  log({ stage: 'browser_starting' });
+async function runSession(target, state, limit, deadline) {
   const browser = await chromium.launch({ timeout: 60000,
     handleSIGTERM: false, handleSIGINT: false });
-  activeBrowsers.add(browser);
-  const heartbeat = setInterval(() => log({ stage: 'resources',
+  activeBrowser = browser;
+  const heartbeat = setInterval(() => record({ stage: 'resources',
     ...memorySnapshot() }), 30000);
   heartbeat.unref();
   let context;
   let closing = false;
-  browser.on('disconnected', () => log({ stage: 'browser_disconnected',
-    expected: closing || abort.signal.aborted, ...memorySnapshot() }));
+  browser.on('disconnected', () => record({ stage: 'browser_disconnected',
+    expected: closing || Boolean(stopSignal), ...memorySnapshot() }));
   try {
-    if (abort.signal.aborted) return;
+    if (stopSignal) return;
     context = await browser.newContext({ reducedMotion: 'reduce' });
     // Block background audio/video, but preserve scripts, styles and images.
     await context.route('**/*', (route) => route.request().resourceType() === 'media'
       ? route.abort() : route.continue());
     const page = await context.newPage();
-    page.on('crash', () => log({ stage: 'page_crashed', ...memorySnapshot() }));
+    page.on('crash', () => record({ stage: 'page_crashed', ...memorySnapshot() }));
     page.setDefaultTimeout(12000);
-    log({ stage: 'opening_page' });
+    record({ stage: 'opening_page' });
     let load;
     try {
       load = await page.goto(target.href, { waitUntil: 'commit', timeout: 60000 });
@@ -158,7 +133,7 @@ async function runSession(target, state, claimCase, canStartCase, deadline, brow
       throw new Error(`Test page navigation failed before HTTP response: ${reason}.`);
     }
     const httpStatus = load?.status() ?? null;
-    log({ stage: 'page_response', httpStatus });
+    record({ stage: 'page_response', httpStatus });
     if (!load?.ok()) throw new Error(`Test page did not return a successful HTTP response: ${httpStatus ?? 'none'}.`);
     if (new URL(page.url()).origin !== target.origin) throw new Error('Test page redirected to another origin.');
 
@@ -169,11 +144,11 @@ async function runSession(target, state, claimCase, canStartCase, deadline, brow
       if (error.name !== 'TimeoutError') throw error;
       throw new Error('Test page returned HTTP successfully, but #profileCode did not become visible within 30 seconds.');
     }
-    log({ stage: 'form_ready' });
+    record({ stage: 'form_ready' });
 
     const confirm = page.locator('#confirmDialog');
     const result = page.locator('#resultDialog');
-    while (claimCase()) {
+    while (!stopSignal && Date.now() < deadline && state.responses < limit) {
       if (new URL(page.url()).origin !== target.origin) throw new Error('Test page changed origin.');
       const code = randomCode();
       let stage = 'fill';
@@ -191,7 +166,7 @@ async function runSession(target, state, claimCase, canStartCase, deadline, brow
         const dismiss = result.getByRole('button', { name: '確認', exact: true });
         await dismiss.waitFor({ state: 'visible' });
         const message = (await result.innerText()).trim().replace(/\s*確認$/, '');
-        log({ code, stage: 'response', message });
+        record({ code, stage: 'response', message });
         state.responses++;
         stage = 'dismiss';
         await dismiss.click();
@@ -213,12 +188,12 @@ async function runSession(target, state, claimCase, canStartCase, deadline, brow
               inert: Boolean(input.closest('[inert]')),
             };
           })).catch(() => null);
-          log({ stage: 'field_state', fields });
+          record({ stage: 'field_state', fields });
         }
-        log({ code, stage, error: String(error.message) });
+        record({ code, stage, error: String(error.message) });
         throw error;
       }
-      if (canStartCase()) {
+      if (!stopSignal && state.responses < limit && Date.now() < deadline) {
         await delay(Math.min(2000, deadline - Date.now()), undefined, { signal: abort.signal });
       }
     }
@@ -226,11 +201,8 @@ async function runSession(target, state, claimCase, canStartCase, deadline, brow
     clearInterval(heartbeat);
     closing = true;
     await context?.close().catch(() => {});
-    try {
-      await browser.close();
-    } finally {
-      activeBrowsers.delete(browser);
-    }
+    await browser.close();
+    activeBrowser = undefined;
   }
 }
 
