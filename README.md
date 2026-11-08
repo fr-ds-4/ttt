@@ -12,3 +12,5 @@
 6. 部署後查看 Runtime Logs。opening_page、page_response、form_ready 和 summary 分別標示開頁、回應、表單就緒及執行結束。有限測試到達次數或時間後會結束。
 
 Docker 建置會預裝 Node.js 24、Playwright 1.64.1、Chromium Headless Shell 和 Linux 系統依賴。程式會將日誌寫到 stdout，並嘗試寫入 results/registration.jsonl。
+
+每批預設最多處理 5 次表單結果。上一批關閉 Chromium 後，若尚未達到次數或時間上限，會立即開啟下一批。
