@@ -93,19 +93,10 @@ async function run() {
   if (target.protocol !== 'https:') throw new Error('TEST_URL must use HTTPS.');
   const maxCases = setting('MAX_CASES', 1, 0, Number.MAX_SAFE_INTEGER);
   const runSeconds = setting('RUN_SECONDS', 360, 0, 3600);
-  const batchSize = setting('BROWSER_BATCH_SIZE', 5, 1, 1000);
   const deadline = runSeconds === 0 ? Infinity : Date.now() + runSeconds * 1000;
   const state = { responses: 0 };
-  const canContinue = () => !stopSignal && Date.now() < deadline &&
-    (maxCases === 0 || state.responses < maxCases);
-  let batch = 0;
-  record({ stage: 'batch_settings', batchSize });
-  while (canContinue()) {
-    batch++;
-    record({ stage: 'batch_started', batch, responses: state.responses });
-    const limit = maxCases === 0 ? batchSize : Math.min(batchSize, maxCases - state.responses);
-    await runSession(target, state, limit, deadline);
-    record({ stage: 'batch_closed', batch, responses: state.responses, ...memorySnapshot() });
+  if (!stopSignal) {
+    await runSession(target, state, maxCases || Infinity, deadline);
   }
   record({ stage: 'summary', responses: state.responses,
     reason: stopSignal ? 'signal' : maxCases > 0 && state.responses >= maxCases
@@ -113,7 +104,6 @@ async function run() {
 }
 
 async function runSession(target, state, limit, deadline) {
-  const startCount = state.responses;
   const browser = await chromium.launch({ timeout: 60000,
     handleSIGTERM: false, handleSIGINT: false });
   activeBrowser = browser;
@@ -158,7 +148,7 @@ async function runSession(target, state, limit, deadline) {
 
     const confirm = page.locator('#confirmDialog');
     const result = page.locator('#resultDialog');
-    while (!stopSignal && Date.now() < deadline && state.responses - startCount < limit) {
+    while (!stopSignal && Date.now() < deadline && state.responses < limit) {
       if (new URL(page.url()).origin !== target.origin) throw new Error('Test page changed origin.');
       const code = randomCode();
       let stage = 'fill';
@@ -184,7 +174,7 @@ async function runSession(target, state, limit, deadline) {
 
         if (!message || message === '預約結果確認' ||
             /captcha|too many requests|\b429\b|人機驗證|驗證碼|頻繁|稍後|系統異常|服務繁忙|暫時無法/i.test(message)) {
-          throw new Error('Result needs review. Batch stopped.');
+          throw new Error('Result needs review. Run stopped.');
         }
       } catch (error) {
         if (stage === 'fill' && error.name === 'TimeoutError') {
@@ -203,7 +193,7 @@ async function runSession(target, state, limit, deadline) {
         record({ code, stage, error: String(error.message) });
         throw error;
       }
-      if (!stopSignal && state.responses - startCount < limit && Date.now() < deadline) {
+      if (!stopSignal && state.responses < limit && Date.now() < deadline) {
         await delay(Math.min(2000, deadline - Date.now()), undefined, { signal: abort.signal });
       }
     }
@@ -211,7 +201,6 @@ async function runSession(target, state, limit, deadline) {
     clearInterval(heartbeat);
     closing = true;
     await context?.close().catch(() => {});
-    // Do not start a new batch unless closing the old browser succeeds.
     await browser.close();
     activeBrowser = undefined;
   }
