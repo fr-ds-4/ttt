@@ -1,15 +1,20 @@
 // Compatible with both CommonJS and ESM package settings on Node.js 24.
 async function main() {
   const { execFileSync } = await import('node:child_process');
-  const { existsSync, mkdirSync, readFileSync } = await import('node:fs');
+  const { existsSync, mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
   const { createRequire } = await import('node:module');
   const { resolve } = await import('node:path');
   const { pathToFileURL } = await import('node:url');
   process.chdir(resolve(process.argv[1], '..'));
   if (existsSync('.env')) process.loadEnvFile('.env');
   process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
-  process.env.TMPDIR = resolve('.playwright-tmp');
-  mkdirSync(process.env.TMPDIR, { recursive: true });
+  const browserTemp = mkdtempSync(resolve(tmpdir(), 'playwright-'));
+  process.env.TMPDIR = browserTemp;
+  process.once('exit', () => {
+    try { rmSync(browserTemp, { recursive: true, force: true }); }
+    catch { /* Temporary files can be removed when the container exits. */ }
+  });
   const require = createRequire(pathToFileURL(resolve('start-wispbyte.js')));
   let installed = false;
   try { installed = require('playwright/package.json').version === '1.64.1'; }

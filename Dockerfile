@@ -8,6 +8,6 @@ RUN npm ci --omit=dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY run.mjs start-wispbyte.js ./
-RUN mkdir -p results .playwright-tmp && chown node:node results .playwright-tmp
+RUN mkdir -p results && chown node:node results
 USER node
 CMD ["node", "start-wispbyte.js"]
