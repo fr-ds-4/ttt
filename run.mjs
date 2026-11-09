@@ -102,8 +102,22 @@ async function run() {
   const runSeconds = setting('RUN_SECONDS', 360, 0, 3600);
   const deadline = runSeconds === 0 ? Infinity : Date.now() + runSeconds * 1000;
   const state = { responses: 0 };
-  if (!stopSignal) {
-    await runSession(target, state, maxCases || Infinity, deadline);
+  let recoveries = 0;
+  const recoveryLimit = setting('MAX_BROWSER_RECOVERIES', 3, 0, 20);
+  while (!stopSignal && Date.now() < deadline && (!maxCases || state.responses < maxCases)) {
+    try {
+      await runSession(target, state, maxCases || Infinity, deadline);
+      break;
+    } catch (error) {
+      if (stopSignal || !error.recoverable) throw error;
+      if (Date.now() >= deadline || (maxCases && state.responses >= maxCases)) break;
+      if (recoveries >= recoveryLimit) throw new Error('Browser recovery limit reached: ' + error.message);
+      const waitMs = Math.min(15000 * 2 ** recoveries, 60000, deadline - Date.now());
+      recoveries++;
+      record({ stage: 'browser_recovery', attempt: recoveries, waitSeconds: waitMs / 1000,
+        responses: state.responses, error: String(error.message) });
+      await delay(waitMs, undefined, { signal: abort.signal });
+    }
   }
   record({ stage: 'summary', responses: state.responses,
     reason: stopSignal ? 'signal' : maxCases > 0 && state.responses >= maxCases
@@ -190,14 +204,13 @@ async function runSession(target, state, limit, deadline) {
         const message = (await result.innerText()).trim().replace(/\s*確認$/, '');
         record({ code, stage: 'response', message });
         state.responses++;
-        stage = 'dismiss';
-        await dismiss.click();
-        await result.waitFor({ state: 'hidden' });
-
         if (!message || message === '預約結果確認' ||
             /captcha|too many requests|\b429\b|人機驗證|驗證碼|頻繁|稍後|系統異常|服務繁忙|暫時無法/i.test(message)) {
           throw new Error('Result needs review. Run stopped.');
         }
+        stage = 'dismiss';
+        await dismiss.click({ noWaitAfter: true });
+        await result.waitFor({ state: 'hidden' });
       } catch (error) {
         if (stage === 'fill' && error.name === 'TimeoutError') {
           const fields = await profile.evaluateAll((elements) => elements.map((input) => {
@@ -213,6 +226,10 @@ async function runSession(target, state, limit, deadline) {
           record({ stage: 'field_state', fields });
         }
         record({ code, stage, error: String(error.message) });
+        // Only restart before final submission, or after an accepted result was recorded.
+        const transient = error.name === 'TimeoutError' ||
+          /Target page, context or browser has been closed|Target crashed|Page crashed/i.test(error.message);
+        error.recoverable = transient && ['fill', 'agree', 'open_confirmation', 'dismiss'].includes(stage);
         throw error;
       }
       if (!stopSignal && state.responses < limit && Date.now() < deadline) {
