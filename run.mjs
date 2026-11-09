@@ -4,8 +4,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 
 class WorkerNeedsAttention extends Error {}
+class TemporarySiteError extends Error {}
 
 function workerExitCode(error) {
+  if (error instanceof TemporarySiteError) return 75;
   return error instanceof WorkerNeedsAttention ? 78 : 1;
 }
 
@@ -223,6 +225,10 @@ async function runSession(target, state, limit, deadline) {
         const message = (await result.innerText()).trim().replace(/\s*確認$/, '');
         record({ code, stage: 'response', message });
         state.responses++;
+        const temporaryResult = /^!\s*無法確認預約結果[。.]?\s*請稍後再試[。.]?\s*已輸入的代碼將會保留[。.]?\s*$/;
+        if (temporaryResult.test(message)) {
+          throw new TemporarySiteError('Site could not confirm the result. Wait at least 60 seconds before restarting.');
+        }
         if (!message || message === '預約結果確認' ||
             /captcha|too many requests|\b429\b|人機驗證|驗證碼|頻繁|稍後|系統異常|服務繁忙|暫時無法/i.test(message)) {
           throw new WorkerNeedsAttention('Result needs review. Run stopped.');

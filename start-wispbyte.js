@@ -54,6 +54,7 @@ async function superviseWorker() {
         return;
       }
 
+      if (status === 75) waitMs = Math.max(waitMs, 60000);
       console.log(JSON.stringify({ time: new Date().toISOString(),
         stage: 'worker_restart', exitCode, signal, waitSeconds: waitMs / 1000 }));
       await delay(waitMs, undefined, { signal: shutdown.signal });
