@@ -3,6 +3,12 @@ import { mkdirSync, appendFileSync, statSync, renameSync, rmSync, readFileSync }
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 
+class WorkerNeedsAttention extends Error {}
+
+function workerExitCode(error) {
+  return error instanceof WorkerNeedsAttention ? 78 : 1;
+}
+
 const logPath = 'results/registration.jsonl';
 let logBytes = 0;
 let fileLogging = true;
@@ -74,7 +80,7 @@ process.on('SIGINT', onSignal);
 function setting(name, fallback, min, max) {
   const value = Number(process.env[name] ?? fallback);
   if (!Number.isSafeInteger(value) || value < min || value > max) {
-    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+    throw new WorkerNeedsAttention(`${name} must be an integer between ${min} and ${max}`);
   }
   return value;
 }
@@ -94,9 +100,9 @@ function randomCode() {
 }
 
 async function run() {
-  if (!process.env.TEST_URL) throw new Error('Set TEST_URL in the deployment environment variables.');
-  const target = new URL(process.env.TEST_URL);
-  if (target.protocol !== 'https:') throw new Error('TEST_URL must use HTTPS.');
+  if (!process.env.TEST_URL) throw new WorkerNeedsAttention('Set TEST_URL in the deployment environment variables.');
+  const target = URL.parse(process.env.TEST_URL);
+  if (target?.protocol !== 'https:') throw new WorkerNeedsAttention('TEST_URL must be a valid HTTPS URL.');
   record({ stage: 'worker_started', pid: process.pid });
   const maxCases = setting('MAX_CASES', 1, 0, Number.MAX_SAFE_INTEGER);
   const runSeconds = setting('RUN_SECONDS', 360, 0, 3600);
@@ -133,6 +139,8 @@ async function runSession(target, state, limit, deadline) {
   heartbeat.unref();
   let context;
   let closing = false;
+  let sitePause;
+  let failure;
   browser.on('disconnected', () => record({ stage: 'browser_disconnected',
     expected: closing || Boolean(stopSignal), ...memorySnapshot() }));
   try {
@@ -143,6 +151,13 @@ async function runSession(target, state, limit, deadline) {
       ? route.abort() : route.continue());
     const page = await context.newPage();
     page.on('crash', () => record({ stage: 'page_crashed', ...memorySnapshot() }));
+    page.on('response', (response) => {
+      if (closing || response.status() !== 429 || URL.parse(response.url())?.origin !== target.origin) return;
+      if (!['document', 'fetch', 'xhr'].includes(response.request().resourceType())) return;
+      sitePause = new WorkerNeedsAttention('Test site requested a pause (HTTP 429).');
+      closing = true;
+      browser.close({ reason: sitePause.message }).catch(() => {});
+    });
     page.setDefaultTimeout(12000);
     record({ stage: 'opening_page' });
     let load;
@@ -155,22 +170,26 @@ async function runSession(target, state, limit, deadline) {
     }
     const httpStatus = load?.status() ?? null;
     record({ stage: 'page_response', httpStatus });
-    if (!load?.ok()) throw new Error(`Test page did not return a successful HTTP response: ${httpStatus ?? 'none'}.`);
-    if (new URL(page.url()).origin !== target.origin) throw new Error('Test page redirected to another origin.');
+    if (!load?.ok()) {
+      const message = `Test page did not return a successful HTTP response: ${httpStatus ?? 'none'}.`;
+      if (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408) throw new WorkerNeedsAttention(message);
+      throw new Error(message);
+    }
+    if (new URL(page.url()).origin !== target.origin) throw new WorkerNeedsAttention('Test page redirected to another origin.');
 
     const profile = page.locator('#profileCode');
     try {
       await profile.waitFor({ state: 'visible', timeout: 30000 });
     } catch (error) {
       if (error.name !== 'TimeoutError') throw error;
-      throw new Error('Test page returned HTTP successfully, but #profileCode did not become visible within 30 seconds.');
+      throw new WorkerNeedsAttention('Test page returned HTTP successfully, but #profileCode did not become visible within 30 seconds.');
     }
     record({ stage: 'form_ready' });
 
     const confirm = page.locator('#confirmDialog');
     const result = page.locator('#resultDialog');
     while (!stopSignal && Date.now() < deadline && state.responses < limit) {
-      if (new URL(page.url()).origin !== target.origin) throw new Error('Test page changed origin.');
+      if (new URL(page.url()).origin !== target.origin) throw new WorkerNeedsAttention('Test page changed origin.');
       const code = randomCode();
       let stage = 'fill';
       try {
@@ -181,7 +200,7 @@ async function runSession(target, state, limit, deadline) {
         await page.locator('#submitBtn').click();
         await confirm.waitFor({ state: 'visible' });
         const codes = (await confirm.innerText()).match(/[A-Za-z0-9]+/g) ?? [];
-        if (!codes.includes(code)) throw new Error('Confirmation code did not match.');
+        if (!codes.includes(code)) throw new WorkerNeedsAttention('Confirmation code did not match.');
         // Ensure an old dialog cannot be mistaken for this submission's result.
         await result.waitFor({ state: 'hidden' });
         stage = 'submit_attempted';
@@ -199,14 +218,14 @@ async function runSession(target, state, limit, deadline) {
           await dismiss.waitFor({ state: 'visible', timeout: 60000 });
         } catch (error) {
           if (error.name !== 'TimeoutError' || stopSignal) throw error;
-          throw new Error('Submission result unknown after 60 seconds; stopped without resubmitting.');
+          throw new Error('Submission result unknown after 60 seconds.');
         }
         const message = (await result.innerText()).trim().replace(/\s*確認$/, '');
         record({ code, stage: 'response', message });
         state.responses++;
         if (!message || message === '預約結果確認' ||
             /captcha|too many requests|\b429\b|人機驗證|驗證碼|頻繁|稍後|系統異常|服務繁忙|暫時無法/i.test(message)) {
-          throw new Error('Result needs review. Run stopped.');
+          throw new WorkerNeedsAttention('Result needs review. Run stopped.');
         }
         stage = 'dismiss';
         await dismiss.click({ noWaitAfter: true });
@@ -236,18 +255,32 @@ async function runSession(target, state, limit, deadline) {
         await delay(Math.min(2000, deadline - Date.now()), undefined, { signal: abort.signal });
       }
     }
+    if (sitePause) throw sitePause;
+  } catch (error) {
+    failure = sitePause ?? error;
+    throw failure;
   } finally {
     clearInterval(heartbeat);
     closing = true;
-    await context?.close().catch(() => {});
-    await browser.close();
-    activeBrowser = undefined;
+    const cleanupTimer = setTimeout(() => {
+      record({ stage: 'browser_cleanup_timeout' });
+      process.exit(stopSignal ? process.exitCode : workerExitCode(failure));
+    }, 15000);
+    try {
+      await context?.close().catch(() => {});
+      await browser.close().catch((error) => {
+        if (!failure && !stopSignal) throw error;
+      });
+    } finally {
+      clearTimeout(cleanupTimer);
+      activeBrowser = undefined;
+    }
   }
 }
 
-run().catch((error) => {
+await run().catch((error) => {
   record({ stage: 'stopped', signal: stopSignal ?? null, error: String(error.message) });
-  if (!stopSignal) process.exitCode = 1;
+  if (!stopSignal) process.exitCode = workerExitCode(error);
 }).finally(() => {
   clearTimeout(shutdownTimer);
   process.removeListener('SIGTERM', onSignal);
