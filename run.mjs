@@ -4,12 +4,18 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 
 const logPath = 'results/registration.jsonl';
-mkdirSync('results', { recursive: true });
 let logBytes = 0;
-try { logBytes = statSync(logPath).size; } catch (error) {
-  if (error.code !== 'ENOENT') throw error;
-}
 let fileLogging = true;
+try {
+  mkdirSync('results', { recursive: true });
+  try { logBytes = statSync(logPath).size; } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+} catch (error) {
+  fileLogging = false;
+  console.error(JSON.stringify({ time: new Date().toISOString(),
+    stage: 'file_log_disabled', error: String(error.message) }));
+}
 
 function record(entry) {
   const row = { time: new Date().toISOString(), ...entry };
@@ -91,6 +97,7 @@ async function run() {
   if (!process.env.TEST_URL) throw new Error('Set TEST_URL in the deployment environment variables.');
   const target = new URL(process.env.TEST_URL);
   if (target.protocol !== 'https:') throw new Error('TEST_URL must use HTTPS.');
+  record({ stage: 'worker_started', pid: process.pid });
   const maxCases = setting('MAX_CASES', 1, 0, Number.MAX_SAFE_INTEGER);
   const runSeconds = setting('RUN_SECONDS', 360, 0, 3600);
   const deadline = runSeconds === 0 ? Infinity : Date.now() + runSeconds * 1000;
@@ -161,10 +168,25 @@ async function runSession(target, state, limit, deadline) {
         await confirm.waitFor({ state: 'visible' });
         const codes = (await confirm.innerText()).match(/[A-Za-z0-9]+/g) ?? [];
         if (!codes.includes(code)) throw new Error('Confirmation code did not match.');
+        // Ensure an old dialog cannot be mistaken for this submission's result.
+        await result.waitFor({ state: 'hidden' });
         stage = 'submit_attempted';
-        await confirm.locator('#confirmSubmit').click();
+        try {
+          // Observe the result dialog ourselves instead of waiting for navigation.
+          await confirm.locator('#confirmSubmit').click({ noWaitAfter: true });
+        } catch (error) {
+          if (error.name !== 'TimeoutError' || stopSignal) throw error;
+          record({ code, stage: 'submit_wait_warning', error: String(error.message) });
+          // The click may already have happened. Never click it a second time.
+        }
+        stage = 'waiting_result';
         const dismiss = result.getByRole('button', { name: '確認', exact: true });
-        await dismiss.waitFor({ state: 'visible' });
+        try {
+          await dismiss.waitFor({ state: 'visible', timeout: 60000 });
+        } catch (error) {
+          if (error.name !== 'TimeoutError' || stopSignal) throw error;
+          throw new Error('Submission result unknown after 60 seconds; stopped without resubmitting.');
+        }
         const message = (await result.innerText()).trim().replace(/\s*確認$/, '');
         record({ code, stage: 'response', message });
         state.responses++;
