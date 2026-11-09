@@ -24,17 +24,19 @@ async function main() {
     execFileSync('npm', ['install', '--no-save', '--no-package-lock',
       '--no-audit', '--no-fund', 'playwright@1.64.1'], { stdio: 'inherit' });
   } else console.log('Reusing installed Playwright 1.64.1.');
-  // Resolve the public package.json, then use its declared executable.
-  // The ./cli subpath is not exported by Playwright.
-  const packagePath = require.resolve('playwright/package.json');
-  const metadata = JSON.parse(readFileSync(packagePath, 'utf8'));
-  const bin = typeof metadata.bin === 'string' ? metadata.bin : metadata.bin?.playwright;
-  if (!bin) throw new Error('Installed Playwright does not declare its CLI executable.');
-  const cliPath = resolve(packagePath, '..', bin);
-  if (!existsSync(cliPath)) throw new Error('Installed Playwright CLI executable is missing.');
-  // Checks for the matching headless browser; downloads only if absent.
-  execFileSync(process.execPath, [cliPath,
-    'install', '--only-shell', 'chromium'], { stdio: 'inherit' });
+  if (process.env.SKIP_BROWSER_INSTALL !== '1') {
+    // Resolve the public package.json, then use its declared executable.
+    // The ./cli subpath is not exported by Playwright.
+    const packagePath = require.resolve('playwright/package.json');
+    const metadata = JSON.parse(readFileSync(packagePath, 'utf8'));
+    const bin = typeof metadata.bin === 'string' ? metadata.bin : metadata.bin?.playwright;
+    if (!bin) throw new Error('Installed Playwright does not declare its CLI executable.');
+    const cliPath = resolve(packagePath, '..', bin);
+    if (!existsSync(cliPath)) throw new Error('Installed Playwright CLI executable is missing.');
+    // Checks for the matching headless browser; downloads only if absent.
+    execFileSync(process.execPath, [cliPath,
+      'install', '--only-shell', 'chromium'], { stdio: 'inherit' });
+  } else console.log('Using browser installed during Docker build.');
   await import(pathToFileURL(resolve('run.mjs')).href);
 }
 main().catch((error) => {
